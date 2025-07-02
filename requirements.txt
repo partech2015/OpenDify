@@ -1,3 +1,5 @@
 flask
 httpx
 python-dotenv
+Flask-Cors
+gunicorn

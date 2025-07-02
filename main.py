@@ -2,6 +2,7 @@ import json
 import logging
 import asyncio
 from flask import Flask, request, Response, stream_with_context, jsonify
+from flask_cors import CORS
 import httpx
 import time
 from dotenv import load_dotenv
@@ -102,6 +103,7 @@ model_manager = DifyModelManager()
 DIFY_API_BASE = os.getenv("DIFY_API_BASE", "")
 
 app = Flask(__name__)
+CORS(app)
 
 def get_api_key(model_name):
     """根据模型名称获取对应的API密钥"""
@@ -760,13 +762,14 @@ def list_models():
     logger.info(f"Available models: {json.dumps(response, ensure_ascii=False)}")
     return response
 
+# 启动时初始化模型信息
+# 确保在Gunicorn启动时执行一次
+asyncio.run(model_manager.refresh_model_info())
+
 # 在main.py的最后初始化时添加环境变量检查：
 if __name__ == '__main__':
     if not VALID_API_KEYS:
         print("Warning: No API keys configured. Set the VALID_API_KEYS environment variable with comma-separated keys.")
-    
-    # 启动时初始化模型信息
-    asyncio.run(model_manager.refresh_model_info())
     
     host = os.getenv("SERVER_HOST", "127.0.0.1")
     port = int(os.getenv("SERVER_PORT", 5000))
