@@ -97,7 +97,7 @@ Get a list of all available models:
 import openai
 
 openai.api_base = "http://127.0.0.1:5000/v1"
-openai.api_key = "any"  # Can use any value
+openai.api_key = "sk-abc123"  # Use configured valid API key
 
 # Get available models
 models = openai.Model.list()
@@ -131,7 +131,7 @@ The system automatically retrieves application names from the Dify API and uses 
 import openai
 
 openai.api_base = "http://127.0.0.1:5000/v1"
-openai.api_key = "any"  # Can use any value
+openai.api_key = "sk-abc123"  # Use configured valid API key
 
 response = openai.ChatCompletion.create(
     model="My Translation App",  # Use the Dify application name
@@ -183,6 +183,9 @@ DIFY_API_KEYS=app-xxxxxxxx,app-yyyyyyyy,app-zzzzzzzz
 # Dify API Base URL
 DIFY_API_BASE="https://your-dify-api-base-url/v1"
 
+# OpenAI Compatible API Keys (for client authentication)
+VALID_API_KEYS="sk-abc123,sk-def456"
+
 # Server Configuration
 SERVER_HOST="127.0.0.1"
 SERVER_PORT=5000
@@ -190,8 +193,8 @@ SERVER_PORT=5000
 
 Configuration notes:
 - `DIFY_API_KEYS`: A comma-separated list of API Keys, each corresponding to a Dify application
+- `VALID_API_KEYS`: Valid API keys for client authentication, comma-separated
 - The system automatically retrieves the name and information of each application from the Dify API
-- No need to manually configure model names and mapping relationships
 
 ### Running the Service
 

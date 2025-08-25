@@ -92,7 +92,7 @@ CONVERSATION_MEMORY_MODE=1
 import openai
 
 openai.api_base = "http://127.0.0.1:5000/v1"
-openai.api_key = "any"  # 可以使用任意值
+openai.api_key = "sk-abc123"  # 使用配置的有效API Key
 
 # 获取可用模型列表
 models = openai.Model.list()
@@ -126,7 +126,7 @@ print(models)
 import openai
 
 openai.api_base = "http://127.0.0.1:5000/v1"
-openai.api_key = "any"  # 可以使用任意值
+openai.api_key = "sk-abc123"  # 使用配置的有效API Key
 
 response = openai.ChatCompletion.create(
     model="My Translation App",  # 使用 Dify 应用的名称
@@ -178,6 +178,9 @@ DIFY_API_KEYS=app-xxxxxxxx,app-yyyyyyyy,app-zzzzzzzz
 # Dify API Base URL
 DIFY_API_BASE="https://your-dify-api-base-url/v1"
 
+# OpenAI Compatible API Keys (for client authentication)
+VALID_API_KEYS="sk-abc123,sk-def456"
+
 # Server Configuration
 SERVER_HOST="127.0.0.1"
 SERVER_PORT=5000
@@ -185,8 +188,8 @@ SERVER_PORT=5000
 
 配置说明：
 - `DIFY_API_KEYS`：以逗号分隔的 API Keys 列表，每个 Key 对应一个 Dify 应用
+- `VALID_API_KEYS`：客户端连接时使用的有效 API Keys，以逗号分隔
 - 系统会自动从 Dify API 获取每个应用的名称和信息
-- 无需手动配置模型名称和映射关系
 
 ### 运行服务
 
