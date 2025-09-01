@@ -2,7 +2,7 @@
 
 OpenDify 是一个将 Dify API 转换为 OpenAI API 格式的代理服务器。它允许使用 OpenAI API 客户端直接与 Dify 服务进行交互。
 
-> 🌟 本项目完全由 Cursor + Claude-3.5 自动生成，未手动编写任何代码（包括此Readme），向 AI 辅助编程的未来致敬！
+> 🌟 本项目完全由AI自动生成，未手动编写任何代码（包括此Readme），向 AI 辅助编程的未来致敬！
 
 [English Version](README_EN.md)
 
@@ -13,6 +13,7 @@ OpenDify 是一个将 Dify API 转换为 OpenAI API 格式的代理服务器。�
 - 智能动态延迟控制，提供流畅的输出体验
 - 支持多种会话记忆模式，包括零宽字符模式和history_message模式
 - 支持 OpenAI Function Call 和 MCP Server 功能
+- **支持图片附件上传**：自动处理包含图片的多模态请求，支持视觉模型
 - 支持多个模型配置
 - 支持Dify Agent应用，处理高级工具调用（如生成图片等）
 - 兼容标准的 OpenAI API 客户端
@@ -45,6 +46,27 @@ OpenDify 是一个将 Dify API 转换为 OpenAI API 格式的代理服务器。�
 
 *上图展示了OpenDify的会话记忆功能。当用户提问"今天是什么天气？"时，AI能够记住之前对话中提到"今天是晴天"的上下文信息，并给出相应回复。*
 
+### 图片附件支持
+
+OpenDify 现在支持处理包含图片的多模态请求，自动将图片上传到 Dify 平台并正确传递给支持视觉的模型。
+
+![图片附件支持示例](images/4.png)
+
+*上图展示了 OpenDify 对图片附件的支持。系统会自动检测请求中的图片内容，将其上传到 Dify 平台，并在请求中正确引用上传的文件。*
+
+> ⚠️ **重要提醒**：
+> 
+> 1. **Dify 平台限制**：当前 Dify 平台仅支持图片类型的附件上传，请确保上传的文件为 PNG、JPG、JPEG、WEBP 或 GIF 格式。
+> 
+> 2. **Cherry Studio 客户端设置**：如果您使用的是 Cherry Studio 客户端，请确保在模型设置中启用了视觉支持（参考下图），否则客户端不会发送任何附件内容到 API。
+> 
+> ![Cherry Studio 视觉支持设置](images/5.png)
+> 
+> 3. **Dify 平台视觉设置**：同时请确保在 Dify 平台上对应的模型也已勾选开启视觉功能，否则平台侧不会响应任何图片内容。
+> 
+> ![Dify 平台视觉功能设置](images/6.png)
+
+## 特性
 
 ### 会话记忆功能
 
@@ -205,4 +227,4 @@ python main.py
 
 ## 许可证
 
-[MIT License](LICENSE) 
+[MIT License](LICENSE)
