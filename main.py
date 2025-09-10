@@ -6,7 +6,6 @@ import httpx
 import time
 from dotenv import load_dotenv
 import os
-import ast
 
 # 配置日志
 logging.basicConfig(
@@ -46,7 +45,7 @@ class DifyModelManager:
     async def fetch_app_info(self, api_key):
         """获取Dify应用信息"""
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=None) as client:
                 headers = {
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json"
@@ -132,7 +131,7 @@ async def upload_image_to_dify(api_key, base64_data, user_id="default_user"):
         
         try:
             # 使用httpx上传文件到Dify
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=None) as client:
                 headers = {
                     "Authorization": f"Bearer {api_key}"
                 }
@@ -184,6 +183,7 @@ async def transform_openai_to_dify(openai_request, endpoint, api_key=None):
         messages = openai_request.get("messages", [])
         stream = openai_request.get("stream", False)
         user_id = openai_request.get("user", "default_user")
+        inputs = openai_request.get("inputs", {})
         
         # 尝试从历史消息中提取conversation_id
         conversation_id = None
@@ -255,7 +255,7 @@ async def transform_openai_to_dify(openai_request, endpoint, api_key=None):
                 logger.info(f"[零宽字符模式] 首次对话，添加system内容到查询前")
             
             dify_request = {
-                "inputs": {},
+                "inputs": inputs,
                 "query": user_query,
                 "response_mode": "streaming" if stream else "blocking",
                 "conversation_id": conversation_id,
@@ -295,7 +295,7 @@ async def transform_openai_to_dify(openai_request, endpoint, api_key=None):
                 logger.info(f"[history_message模式] 首次对话，添加system内容到查询前")
             
             dify_request = {
-                "inputs": {},
+                "inputs": inputs,
                 "query": user_query,
                 "response_mode": "streaming" if stream else "blocking",
                 "user": user_id
@@ -809,7 +809,7 @@ def chat_completions():
         else:
             async def sync_response():
                 try:
-                    async with httpx.AsyncClient() as client:
+                    async with httpx.AsyncClient(timeout=None) as client:
                         response = await client.post(
                             dify_endpoint,
                             json=dify_request,
@@ -844,7 +844,7 @@ def chat_completions():
                         else:
                             return openai_response
                 except httpx.RequestError as e:
-                    error_msg = f"Failed to connect to Dify: {str(e)}"
+                    error_msg = f"Failed to connect to Dify: {repr(e)}"
                     logger.error(error_msg)
                     return {
                         "error": {
