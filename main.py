@@ -837,9 +837,7 @@ def chat_completions():
                 headers={
                     'Cache-Control': 'no-cache, no-transform',
                     'Connection': 'keep-alive',
-                    'Transfer-Encoding': 'chunked',
-                    'X-Accel-Buffering': 'no',
-                    'Content-Encoding': 'none'
+                    'X-Accel-Buffering': 'no'
                 },
                 direct_passthrough=True
             )
