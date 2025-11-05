@@ -7,7 +7,6 @@ import httpx
 import time
 from dotenv import load_dotenv
 import os
-import ast
 
 # 配置日志
 logging.basicConfig(
@@ -47,7 +46,7 @@ class DifyModelManager:
     async def fetch_app_info(self, api_key):
         """获取Dify应用信息"""
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=None) as client:
                 headers = {
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json"
@@ -112,12 +111,96 @@ def get_api_key(model_name):
         logger.warning(f"No API key found for model: {model_name}")
     return api_key
 
-def transform_openai_to_dify(openai_request, endpoint):
+async def upload_image_to_dify(api_key, base64_data, user_id="default_user"):
+    """上传图片到Dify并返回文件ID
+    支持处理base64编码的图片数据，自动检测并提取有效的base64数据
+    """
+    try:
+        # 解码base64数据
+        if base64_data.startswith('data:image'):
+            # 提取实际的base64数据 (去除data:image/*;base64,前缀)
+            base64_data = base64_data.split(',')[1]
+        
+        import base64
+        image_data = base64.b64decode(base64_data)
+        
+        # 创建临时文件
+        import tempfile
+        import os
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+            tmp_file.write(image_data)
+            tmp_file_path = tmp_file.name
+        
+        try:
+            # 使用httpx上传文件到Dify
+            async with httpx.AsyncClient(timeout=None) as client:
+                headers = {
+                    "Authorization": f"Bearer {api_key}"
+                }
+                
+                # 准备multipart数据用于文件上传
+                # Dify当前仅支持图片类型附件的上传 (PNG, JPG, JPEG, WEBP, GIF)
+                with open(tmp_file_path, 'rb') as file_handle:
+                    files = {
+                        'file': ('image.png', file_handle, 'image/png')
+                    }
+                    data = {
+                        'user': user_id
+                    }
+                    
+                    response = await client.post(
+                        f"{DIFY_API_BASE}/files/upload",
+                        headers=headers,
+                        files=files,
+                        data=data
+                    )
+                
+                # 检查上传响应状态码
+                # HTTP 200: OK, HTTP 201: Created
+                if response.status_code in [200, 201]:
+                    file_info = response.json()
+                    logger.info(f"Successfully uploaded image, file_id: {file_info.get('id')}")
+                    return file_info.get('id')
+                else:
+                    logger.error(f"Failed to upload image, status_code: {response.status_code}, response: {response.text}")
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"Error uploading image: {str(e)}")
+            return None
+            
+        finally:
+            # 确保临时文件被清理，避免磁盘空间泄露
+            if tmp_file_path and os.path.exists(tmp_file_path):
+                try:
+                    # 等待一小段时间确保文件句柄完全释放
+                    import asyncio
+                    await asyncio.sleep(0.1)
+                    os.unlink(tmp_file_path)
+                    logger.debug(f"Temporary file cleaned up: {tmp_file_path}")
+                except Exception as cleanup_error:
+                    logger.warning(f"Failed to cleanup temporary file {tmp_file_path}: {cleanup_error}")
+                    # 如果立即删除失败，尝试延迟删除
+                    try:
+                        await asyncio.sleep(1)
+                        if os.path.exists(tmp_file_path):
+                            os.unlink(tmp_file_path)
+                            logger.debug(f"Temporary file cleaned up after delay: {tmp_file_path}")
+                    except Exception as delayed_cleanup_error:
+                        logger.error(f"Failed to cleanup temporary file after delay {tmp_file_path}: {delayed_cleanup_error}")
+            
+    except Exception as e:
+        logger.error(f"Error processing image data: {str(e)}")
+        return None
+
+async def transform_openai_to_dify(openai_request, endpoint, api_key=None):
     """将OpenAI格式的请求转换为Dify格式"""
     
     if endpoint == "/chat/completions":
         messages = openai_request.get("messages", [])
         stream = openai_request.get("stream", False)
+        user_id = openai_request.get("user", "default_user")
+        inputs = openai_request.get("inputs", {})
         
         # 尝试从历史消息中提取conversation_id
         conversation_id = None
@@ -130,6 +213,70 @@ def transform_openai_to_dify(openai_request, endpoint):
             # 记录找到的system消息
             logger.info(f"Found system message: {system_content[:100]}{'...' if len(system_content) > 100 else ''}")
         
+        # 处理用户消息，支持图片
+        user_message = messages[-1] if messages and messages[-1].get("role") != "system" else {}
+        user_content = user_message.get("content", "")
+        
+        # 存储上传的文件ID
+        uploaded_files = []
+        
+        # 检查用户消息是否包含图片
+        if isinstance(user_content, list):
+            # 处理多模态内容（文本+图片）
+            text_parts = []
+            image_parts = []
+            
+            for item in user_content:
+                if item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+                elif item.get("type") == "image_url":
+                    image_url = item.get("image_url", {}).get("url", "")
+                    if image_url:
+                        image_parts.append(image_url)
+            
+            # 组合文本内容
+            user_query = "\n".join(text_parts) if text_parts else ""
+            
+            # 上传图片文件
+            if api_key and image_parts:
+                logger.info(f"Found {len(image_parts)} images to upload")
+                successful_uploads = 0
+                failed_uploads = 0
+                
+                for i, image_data in enumerate(image_parts):
+                    try:
+                        logger.info(f"Uploading image {i+1}/{len(image_parts)}")
+                        file_id = await upload_image_to_dify(api_key, image_data, user_id)
+                        if file_id:
+                            uploaded_files.append({
+                                "type": "image",
+                                "transfer_method": "local_file",
+                                "upload_file_id": file_id
+                            })
+                            successful_uploads += 1
+                            logger.info(f"Successfully uploaded image {i+1}/{len(image_parts)}, file_id: {file_id}")
+                        else:
+                            failed_uploads += 1
+                            logger.warning(f"Failed to upload image {i+1}/{len(image_parts)}")
+                    except Exception as e:
+                        failed_uploads += 1
+                        logger.error(f"Exception occurred while uploading image {i+1}/{len(image_parts)}: {str(e)}")
+                
+                # 记录上传结果统计
+                if successful_uploads > 0:
+                    logger.info(f"Uploaded {successful_uploads}/{len(image_parts)} files successfully")
+                if failed_uploads > 0:
+                    logger.warning(f"Failed to upload {failed_uploads}/{len(image_parts)} files")
+                
+                # 如果所有图片都上传失败，记录警告
+                if successful_uploads == 0 and failed_uploads > 0:
+                    logger.warning("All image uploads failed, proceeding with text-only request")
+        else:
+            # 处理纯文本内容
+            user_query = user_content
+        
+        logger.info(f"Processing request with {len(uploaded_files)} uploaded files")
+        
         if CONVERSATION_MEMORY_MODE == 2:  # 零宽字符模式
             if len(messages) > 1:
                 # 遍历历史消息，找到最近的assistant消息
@@ -141,25 +288,24 @@ def transform_openai_to_dify(openai_request, endpoint):
                         if conversation_id:
                             break
             
-            # 获取最后一条用户消息
-            user_query = messages[-1]["content"] if messages and messages[-1].get("role") != "system" else ""
-            
             # 如果有system消息且是首次对话(没有conversation_id)，则将system内容添加到用户查询前
             if system_content and not conversation_id:
                 user_query = f"系统指令: {system_content}\n\n用户问题: {user_query}"
                 logger.info(f"[零宽字符模式] 首次对话，添加system内容到查询前")
             
             dify_request = {
-                "inputs": {},
+                "inputs": inputs,
                 "query": user_query,
                 "response_mode": "streaming" if stream else "blocking",
                 "conversation_id": conversation_id,
-                "user": openai_request.get("user", "default_user")
+                "user": user_id
             }
-        else:  # history_message模式(默认)
-            # 获取最后一条用户消息
-            user_query = messages[-1]["content"] if messages and messages[-1].get("role") != "system" else ""
             
+            # 如果有上传的文件，添加到请求中
+            if uploaded_files:
+                dify_request["files"] = uploaded_files
+                
+        else:  # history_message模式(默认)
             # 构造历史消息
             if len(messages) > 1:
                 history_messages = []
@@ -188,11 +334,15 @@ def transform_openai_to_dify(openai_request, endpoint):
                 logger.info(f"[history_message模式] 首次对话，添加system内容到查询前")
             
             dify_request = {
-                "inputs": {},
+                "inputs": inputs,
                 "query": user_query,
                 "response_mode": "streaming" if stream else "blocking",
-                "user": openai_request.get("user", "default_user")
+                "user": user_id
             }
+            
+            # 如果有上传的文件，添加到请求中
+            if uploaded_files:
+                dify_request["files"] = uploaded_files
 
         return dify_request
     
@@ -425,9 +575,10 @@ def chat_completions():
 
         # 继续处理原始逻辑
         openai_request = request.get_json()
+        
         logger.info(f"Received request: {json.dumps(openai_request, ensure_ascii=False)}")
         
-        model = openai_request.get("model", "claude-3-5-sonnet-v2")
+        model = openai_request.get("model", "claude-3-5-sonnet")
         
         # 验证模型是否支持
         api_key = get_api_key(model)
@@ -442,7 +593,16 @@ def chat_completions():
                 }
             }, 404
             
-        dify_request = transform_openai_to_dify(openai_request, "/chat/completions")
+        # 转换请求并处理图片上传
+        dify_request = asyncio.run(transform_openai_to_dify(openai_request, "/chat/completions", api_key))
+        
+        # Debug模式下打印转换后的请求
+        if '--debug' in sys.argv:
+            print("=" * 50)
+            print("TRANSFORMED REQUEST DEBUG INFO")
+            print("=" * 50)
+            print(f"Transformed Body: {json.dumps(dify_request, ensure_ascii=False, indent=2)}")
+            print("=" * 50)
         
         if not dify_request:
             logger.error("Failed to transform request")
@@ -679,16 +839,14 @@ def chat_completions():
                 headers={
                     'Cache-Control': 'no-cache, no-transform',
                     'Connection': 'keep-alive',
-                    'Transfer-Encoding': 'chunked',
-                    'X-Accel-Buffering': 'no',
-                    'Content-Encoding': 'none'
+                    'X-Accel-Buffering': 'no'
                 },
                 direct_passthrough=True
             )
         else:
             async def sync_response():
                 try:
-                    async with httpx.AsyncClient() as client:
+                    async with httpx.AsyncClient(timeout=None) as client:
                         response = await client.post(
                             dify_endpoint,
                             json=dify_request,
@@ -723,7 +881,7 @@ def chat_completions():
                         else:
                             return openai_response
                 except httpx.RequestError as e:
-                    error_msg = f"Failed to connect to Dify: {str(e)}"
+                    error_msg = f"Failed to connect to Dify: {repr(e)}"
                     logger.error(error_msg)
                     return {
                         "error": {
@@ -762,16 +920,23 @@ def list_models():
     logger.info(f"Available models: {json.dumps(response, ensure_ascii=False)}")
     return response
 
+import sys
+
 # 启动时初始化模型信息
 # 确保在Gunicorn启动时执行一次
 asyncio.run(model_manager.refresh_model_info())
 
 # 在main.py的最后初始化时添加环境变量检查：
 if __name__ == '__main__':
+    # 检查命令行参数
+    debug_mode = '--debug' in sys.argv
+    
     if not VALID_API_KEYS:
         print("Warning: No API keys configured. Set the VALID_API_KEYS environment variable with comma-separated keys.")
     
     host = os.getenv("SERVER_HOST", "127.0.0.1")
     port = int(os.getenv("SERVER_PORT", 5000))
     logger.info(f"Starting server on http://{host}:{port}")
-    app.run(debug=True, host=host, port=port)
+    
+    # 根据debug参数决定是否启用debug模式
+    app.run(debug=debug_mode, host=host, port=port)
