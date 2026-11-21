@@ -1,5 +1,5 @@
-flask
-httpx
+fastapi
+uvicorn[standard]
+httpx[http2]
+ujson
 python-dotenv
-Flask-Cors
-gunicorn
