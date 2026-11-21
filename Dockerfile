@@ -1,6 +1,5 @@
 # 构建阶段
-FROM python:3.11-slim AS builder
-
+FROM docker.m.daocloud.io/library/python:3.11-slim AS builder
 # 设置工作目录
 WORKDIR /app
 
@@ -14,7 +13,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 运行时阶段（与构建阶段保持一致的 glibc 基础镜像，确保 C 扩展兼容）
-FROM python:3.11-slim
+FROM docker.m.daocloud.io/library/python:3.11-slim
 
 # 设置工作目录
 WORKDIR /app

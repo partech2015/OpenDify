@@ -75,6 +75,8 @@ MAX_FILES_PER_REQUEST = int(os.getenv("MAX_FILES_PER_REQUEST", "10") or "10")
 
 OPEN_TOOL_TAG = "<opendify_tool_call>"
 CLOSE_TOOL_TAG = "</opendify_tool_call>"
+ESCAPED_OPEN_TOOL_TAG = "\\<opendify_tool_call>"
+ESCAPED_CLOSE_TOOL_TAG = "\\</opendify_tool_call>"
 
 def fast_uuid() -> str:
     """快速生成UUID hex"""
@@ -727,9 +729,10 @@ def generate_tool_protocol_footer(tool_choice: Any) -> str:
         CLOSE_TOOL_TAG,
         "Rules:",
         "1. `name` MUST exactly match a function name from AVAILABLE FUNCTIONS.",
-        "2. `arguments` MUST be a valid JSON object matching the function's Parameters JSON Schema (do NOT double-escape JSON into a string).",
-        f"3. To invoke multiple tools in parallel, output multiple `{OPEN_TOOL_TAG}...{CLOSE_TOOL_TAG}` blocks.",
-        f"4. If no function call is needed, answer the user directly WITHOUT `{OPEN_TOOL_TAG}` tags.",
+        "2. `arguments` MUST be a valid JSON object matching the function's Parameters JSON Schema (do NOT double-escape JSON into a string; escape backslashes in Windows paths as `\\\\` or use `/`).",
+        f"3. Output `{OPEN_TOOL_TAG}` and `{CLOSE_TOOL_TAG}` literally without backslash escaping (do NOT write `\\{OPEN_TOOL_TAG}`).",
+        f"4. To invoke multiple tools in parallel, output multiple `{OPEN_TOOL_TAG}...{CLOSE_TOOL_TAG}` blocks.",
+        f"5. If no function call is needed, answer the user directly WITHOUT `{OPEN_TOOL_TAG}` tags.",
     ]
     if tool_choice == "required":
         lines.append(f"[IMPORTANT]: You MUST invoke at least one function in this turn using `{OPEN_TOOL_TAG}...{CLOSE_TOOL_TAG}`.")
@@ -960,28 +963,120 @@ def _strip_optional_code_fence(raw: str) -> str:
             s = s.rstrip()[:-3]
     return s.strip()
 
+def _repair_json_string_escapes(raw_json: str) -> str:
+    """修复模型输出中的非法JSON反斜杠转义（如未转义的 Windows 路径 D:\\Projects\\...）"""
+    out: List[str] = []
+    i = 0
+    n = len(raw_json)
+    while i < n:
+        ch = raw_json[i]
+        if ch != '"':
+            out.append(ch)
+            i += 1
+            continue
+
+        j = i + 1
+        chars: List[str] = []
+        had_invalid_escape = False
+        has_double_backslash = False
+        while j < n:
+            c = raw_json[j]
+            if c == '"':
+                break
+            if c == "\\":
+                if j + 1 < n:
+                    nxt = raw_json[j + 1]
+                    if nxt == "\\":
+                        has_double_backslash = True
+                        chars.append("\\\\")
+                        j += 2
+                        continue
+                    if nxt in ('"', "/", "b", "f", "n", "r", "t"):
+                        chars.append("\\" + nxt)
+                        j += 2
+                        continue
+                    if nxt == "u" and j + 5 < n and all(h in "0123456789abcdefABCDEF" for h in raw_json[j + 2 : j + 6]):
+                        chars.append(raw_json[j : j + 6])
+                        j += 6
+                        continue
+                    had_invalid_escape = True
+                    chars.append("\\\\")
+                    j += 1
+                    continue
+                had_invalid_escape = True
+                chars.append("\\\\")
+                j += 1
+                continue
+            chars.append(c)
+            j += 1
+
+        token_inner = raw_json[i + 1 : j]
+        # 若整段字符串是未转义的 Windows 路径（如 D:\Projects\...\test_opendify.md），
+        # 其中的 \t/\n/\r/\b/\f 也应视为路径分隔符而非控制字符转义。
+        is_unescaped_win_path = (
+            not has_double_backslash
+            and re.match(r"^(?:[A-Za-z]:\\|\\\\[^\\]+\\)", token_inner) is not None
+        )
+        if is_unescaped_win_path:
+            repaired_chars: List[str] = []
+            k = 0
+            m = len(token_inner)
+            while k < m:
+                if token_inner[k] == "\\":
+                    if k + 1 < m and token_inner[k + 1] == '"':
+                        repaired_chars.append('\\"')
+                        k += 2
+                    else:
+                        repaired_chars.append("\\\\")
+                        k += 1
+                else:
+                    repaired_chars.append(token_inner[k])
+                    k += 1
+            out.append('"' + "".join(repaired_chars) + '"')
+        else:
+            out.append('"' + "".join(chars) + '"')
+
+        if j < n and raw_json[j] == '"':
+            j += 1
+        i = j
+    return "".join(out)
+
+def _decode_tool_json(cleaned: str) -> Any:
+    """解析工具调用 JSON，并在严格解析失败时自动修复非法反斜杠转义后重试"""
+    candidates = [cleaned]
+    repaired = _repair_json_string_escapes(cleaned)
+    if repaired != cleaned:
+        candidates.append(repaired)
+
+    for text in candidates:
+        try:
+            return ujson.loads(text)
+        except Exception:
+            start_idx = -1
+            for i, ch in enumerate(text):
+                if ch in "{[":
+                    start_idx = i
+                    break
+            if start_idx != -1:
+                try:
+                    parsed, _ = json.JSONDecoder().raw_decode(text, start_idx)
+                    return parsed
+                except Exception:
+                    pass
+    return None
+
 def _parse_tool_call_payload(raw_inner: str) -> Optional[List[Dict[str, Any]]]:
     """解析 <opendify_tool_call> 内部的 JSON（兼容单对象、tool_calls包裹对象、数组）"""
-    cleaned = _strip_optional_code_fence(raw_inner)
+    cleaned = raw_inner.strip()
+    if cleaned.endswith("\\"):
+        cleaned = cleaned[:-1].strip()
+    cleaned = _strip_optional_code_fence(cleaned)
     if not cleaned:
         return None
 
-    parsed: Any = None
-    try:
-        parsed = ujson.loads(cleaned)
-    except Exception:
-        # 若JSON后带了多余文本，尝试用标准库 raw_decode 截取首个完整JSON值
-        start_idx = -1
-        for i, ch in enumerate(cleaned):
-            if ch in "{[":
-                start_idx = i
-                break
-        if start_idx == -1:
-            return None
-        try:
-            parsed, _ = json.JSONDecoder().raw_decode(cleaned, start_idx)
-        except Exception:
-            return None
+    parsed = _decode_tool_json(cleaned)
+    if parsed is None:
+        return None
 
     candidates: List[Dict[str, Any]] = []
     if isinstance(parsed, dict):
@@ -995,10 +1090,30 @@ def _parse_tool_call_payload(raw_inner: str) -> Optional[List[Dict[str, Any]]]:
     normalized = _normalize_tool_calls(candidates)
     return normalized if normalized else None
 
+def _find_open_tool_tag(text: str, pos: int = 0) -> Tuple[int, str]:
+    """查找 <opendify_tool_call> 或被模型转义的 \\<opendify_tool_call>"""
+    idx_escaped = text.find(ESCAPED_OPEN_TOOL_TAG, pos)
+    idx_plain = text.find(OPEN_TOOL_TAG, pos)
+    if idx_escaped != -1 and (idx_plain == -1 or idx_escaped < idx_plain):
+        return idx_escaped, ESCAPED_OPEN_TOOL_TAG
+    if idx_plain != -1:
+        return idx_plain, OPEN_TOOL_TAG
+    return -1, ""
+
+def _find_close_tag_at(buf: str, start: int = 0) -> Tuple[int, str]:
+    """查找 </opendify_tool_call> 或 \\</opendify_tool_call>"""
+    idx_escaped = buf.find(ESCAPED_CLOSE_TOOL_TAG, start)
+    idx_plain = buf.find(CLOSE_TOOL_TAG, start)
+    if idx_escaped != -1 and (idx_plain == -1 or idx_escaped < idx_plain):
+        return idx_escaped, ESCAPED_CLOSE_TOOL_TAG
+    if idx_plain != -1:
+        return idx_plain, CLOSE_TOOL_TAG
+    return -1, ""
+
 def _find_complete_close_tag(buf: str) -> Optional[Tuple[str, str]]:
     """
-    在 buf 中查找与开头内容匹配的 </opendify_tool_call> 结束标签。
-    追踪 JSON 字符串状态与大括号深度，防止参数字符串内包含反引号或 </opendify_tool_call> 导致误截断。
+    在 buf 中查找与开头内容匹配的 </opendify_tool_call>（或 \\</opendify_tool_call>）结束标签。
+    追踪 JSON 字符串状态与大括号深度，防止参数字符串内包含反引号或结束标签导致误截断。
     """
     if CLOSE_TOOL_TAG not in buf:
         return None
@@ -1037,6 +1152,8 @@ def _find_complete_close_tag(buf: str) -> Optional[Tuple[str, str]]:
                 elif ch == '"':
                     in_str = False
             else:
+                if buf.startswith(ESCAPED_CLOSE_TOOL_TAG, j):
+                    return buf[:j], buf[j + len(ESCAPED_CLOSE_TOOL_TAG) :]
                 if buf.startswith(CLOSE_TOOL_TAG, j):
                     return buf[:j], buf[j + len(CLOSE_TOOL_TAG) :]
                 if ch == '"':
@@ -1051,30 +1168,30 @@ def _find_complete_close_tag(buf: str) -> Optional[Tuple[str, str]]:
             j += 1
 
         if json_end != -1:
-            close_idx = buf.find(CLOSE_TOOL_TAG, json_end + 1)
+            close_idx, close_tag = _find_close_tag_at(buf, json_end + 1)
             if close_idx != -1:
-                return buf[:close_idx], buf[close_idx + len(CLOSE_TOOL_TAG) :]
+                return buf[:close_idx], buf[close_idx + len(close_tag) :]
             return None
         return None
 
-    close_idx = buf.find(CLOSE_TOOL_TAG, i)
+    close_idx, close_tag = _find_close_tag_at(buf, i)
     if close_idx != -1:
-        return buf[:close_idx], buf[close_idx + len(CLOSE_TOOL_TAG) :]
+        return buf[:close_idx], buf[close_idx + len(close_tag) :]
     return None
 
 def _find_opendify_tool_call_spans(text: str) -> List[Tuple[int, int, str]]:
     spans: List[Tuple[int, int, str]] = []
     pos = 0
     while pos < len(text):
-        start = text.find(OPEN_TOOL_TAG, pos)
+        start, open_tag = _find_open_tool_tag(text, pos)
         if start == -1:
             break
-        inner_start = start + len(OPEN_TOOL_TAG)
+        inner_start = start + len(open_tag)
         res = _find_complete_close_tag(text[inner_start:])
         if res is None:
             break
-        inner, _ = res
-        end = inner_start + len(inner) + len(CLOSE_TOOL_TAG)
+        inner, remainder = res
+        end = len(text) - len(remainder)
         spans.append((start, end, inner))
         pos = end
     return spans
@@ -1145,12 +1262,26 @@ def remove_tool_json_content(text: str) -> str:
     return "".join(pieces).strip()
 
 class _OpenDifyStreamParser:
-    """流式增量解析器：阻止 <opendify_tool_call> 原文泄露到客户端 content 中"""
+    """流式增量解析器：阻止 <opendify_tool_call>（含 \\<opendify_tool_call>）原文泄露到客户端 content 中"""
 
     def __init__(self):
         self.text_buf: str = ""
         self.in_tag: bool = False
         self.tag_buf: str = ""
+        self.open_tag: str = OPEN_TOOL_TAG
+
+    @staticmethod
+    def _match_open_prefix_len(buf: str) -> int:
+        if not buf:
+            return 0
+        best = 0
+        for tag in (ESCAPED_OPEN_TOOL_TAG, OPEN_TOOL_TAG):
+            max_prefix = min(len(buf), len(tag) - 1)
+            for k in range(max_prefix, 0, -1):
+                if buf.endswith(tag[:k]) and k > best:
+                    best = k
+                    break
+        return best
 
     def feed(self, chunk: str) -> List[Tuple[str, Any]]:
         events: List[Tuple[str, Any]] = []
@@ -1160,20 +1291,16 @@ class _OpenDifyStreamParser:
                 self.text_buf += pending
                 pending = ""
 
-                idx = self.text_buf.find(OPEN_TOOL_TAG)
+                idx, matched_tag = _find_open_tool_tag(self.text_buf)
                 if idx != -1:
                     if idx > 0:
                         events.append(("text", self.text_buf[:idx]))
                     self.in_tag = True
-                    pending = self.text_buf[idx + len(OPEN_TOOL_TAG) :]
+                    self.open_tag = matched_tag
+                    pending = self.text_buf[idx + len(matched_tag) :]
                     self.text_buf = ""
                 else:
-                    max_prefix = min(len(self.text_buf), len(OPEN_TOOL_TAG) - 1)
-                    matched_k = 0
-                    for k in range(max_prefix, 0, -1):
-                        if self.text_buf.endswith(OPEN_TOOL_TAG[:k]):
-                            matched_k = k
-                            break
+                    matched_k = self._match_open_prefix_len(self.text_buf)
                     if matched_k > 0:
                         safe = self.text_buf[:-matched_k]
                         if safe:
@@ -1188,7 +1315,7 @@ class _OpenDifyStreamParser:
                 pending = ""
 
                 if TOOL_BUFFER_LIMIT > 0 and len(self.tag_buf) > TOOL_BUFFER_LIMIT:
-                    events.append(("text", OPEN_TOOL_TAG + self.tag_buf))
+                    events.append(("text", self.open_tag + self.tag_buf))
                     self.tag_buf = ""
                     self.in_tag = False
                     break
@@ -1200,7 +1327,7 @@ class _OpenDifyStreamParser:
                     if parsed:
                         events.append(("tool_calls", parsed))
                     else:
-                        events.append(("text", OPEN_TOOL_TAG + inner + CLOSE_TOOL_TAG))
+                        events.append(("text", self.open_tag + inner + CLOSE_TOOL_TAG))
                     self.tag_buf = ""
                     self.in_tag = False
                     pending = remainder
@@ -1210,19 +1337,23 @@ class _OpenDifyStreamParser:
     def finalize(self) -> List[Tuple[str, Any]]:
         events: List[Tuple[str, Any]] = []
         if self.in_tag:
-            close_idx = self.tag_buf.rfind(CLOSE_TOOL_TAG)
+            close_idx = self.tag_buf.rfind(ESCAPED_CLOSE_TOOL_TAG)
+            close_tag = ESCAPED_CLOSE_TOOL_TAG
+            if close_idx == -1:
+                close_idx = self.tag_buf.rfind(CLOSE_TOOL_TAG)
+                close_tag = CLOSE_TOOL_TAG
             if close_idx != -1:
                 inner = self.tag_buf[:close_idx]
-                remainder = self.tag_buf[close_idx + len(CLOSE_TOOL_TAG) :]
+                remainder = self.tag_buf[close_idx + len(close_tag) :]
                 parsed = _parse_tool_call_payload(inner)
                 if parsed:
                     events.append(("tool_calls", parsed))
                     if remainder:
                         events.append(("text", remainder))
                 else:
-                    events.append(("text", OPEN_TOOL_TAG + self.tag_buf))
+                    events.append(("text", self.open_tag + self.tag_buf))
             else:
-                events.append(("text", OPEN_TOOL_TAG + self.tag_buf))
+                events.append(("text", self.open_tag + self.tag_buf))
             self.tag_buf = ""
             self.in_tag = False
 
